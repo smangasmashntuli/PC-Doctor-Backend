@@ -1,0 +1,28 @@
+fastapi
+uvicorn
+sqlalchemy
+passlib[bcrypt]
+python-dotenv
+python-jose
+pymysql
+python-multipart
+psycopg2-binary
+pydantic
+starlette
+
+# Phase 1: RAG Engine dependencies
+chromadb>=0.4.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+lxml>=4.9.0
+
+# Phase 2: Gemini AI & Chat
+google-genai>=0.2.0
+
+# Phase 3: YouTube API & Notifications
+google-api-python-client>=2.100.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+httpx>=0.24.0
