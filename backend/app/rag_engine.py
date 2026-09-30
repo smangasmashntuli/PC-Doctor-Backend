@@ -49,11 +49,9 @@ class RAGEngine:
             # Step 5: Save to MySQL
             db = SessionLocal()
             try:
-                # Get or create laptop setup
+                # Get or create the user's single laptop setup
                 laptop_setup = db.query(LaptopSetup).filter(
-                    LaptopSetup.user_id == user_id,
-                    LaptopSetup.brand == brand,
-                    LaptopSetup.model == model_name
+                    LaptopSetup.user_id == user_id
                 ).first()
                 
                 if not laptop_setup:
@@ -63,6 +61,11 @@ class RAGEngine:
                         model=model_name
                     )
                     db.add(laptop_setup)
+                    db.commit()
+                    db.refresh(laptop_setup)
+                elif laptop_setup.brand != brand or laptop_setup.model != model_name:
+                    laptop_setup.brand = brand
+                    laptop_setup.model = model_name
                     db.commit()
                     db.refresh(laptop_setup)
                 
@@ -134,7 +137,6 @@ class RAGEngine:
                         })
             except Exception as e:
                 logger.warning(f"Search failed for query '{query}': {e}")
-                continue
         
         # Prioritize official sources
         official_domains = [f'{brand.lower()}.com', f'{brand.lower()}.co.uk']
@@ -145,7 +147,7 @@ class RAGEngine:
         )
         
         return prioritized_results[:5]  # Return top 5 results
-    
+
     async def _scrape_specs_from_sources(self, sources: List[Dict]) -> List[Dict]:
         """Scrape laptop specs from source URLs"""
         scraped_data = []
