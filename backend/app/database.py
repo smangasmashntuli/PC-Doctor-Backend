@@ -16,10 +16,12 @@ MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD")
 MYSQL_HOST = os.getenv("MYSQL_HOST")
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE")
 
-
-
-SQLALCHEMY_DATABASE_URL = (
-    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}/{MYSQL_DATABASE}"
+configured_database_url = os.getenv("DATABASE_URL")
+mysql_is_configured = all((MYSQL_USER, MYSQL_PASSWORD, MYSQL_HOST, MYSQL_DATABASE))
+SQLALCHEMY_DATABASE_URL = configured_database_url or (
+    f"mysql+pymysql://{quote_plus(MYSQL_USER)}:{quote_plus(MYSQL_PASSWORD)}@{MYSQL_HOST}/{MYSQL_DATABASE}"
+    if mysql_is_configured
+    else "sqlite:///./database.db"
 )
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in SQLALCHEMY_DATABASE_URL else {})
@@ -45,10 +47,18 @@ def sync_users_table_schema():
         "updated_at": "DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)",
     }
 
-    with engine.begin() as connection:
-        if "username" in existing_columns:
-            connection.execute(text("ALTER TABLE users DROP COLUMN username"))
+    if engine.dialect.name == "sqlite":
+        column_definitions = {
+            "email": "VARCHAR(50)",
+            "hashed_password": "VARCHAR(255)",
+            "name": "VARCHAR(255)",
+            "surname": "VARCHAR(255)",
+            "is_active": "BOOLEAN",
+            "created_at": "DATETIME",
+            "updated_at": "DATETIME",
+        }
 
+    with engine.begin() as connection:
         for column_name, definition in column_definitions.items():
             if column_name not in existing_columns:
                 connection.execute(text(f"ALTER TABLE users ADD COLUMN {column_name} {definition}"))

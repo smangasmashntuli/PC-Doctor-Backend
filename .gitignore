@@ -1,0 +1,7 @@
+__pycache__/main.cpython-314.pyc
+__pycache__/main.cpython-314.pyc
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example

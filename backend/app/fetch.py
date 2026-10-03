@@ -120,7 +120,7 @@ class ExplainComponentResponse(BaseModel):
 
 # Phase 2: Chat & Safety Models
 class ChatMessageRequest(BaseModel):
-    user_id: int
+    user_id: Optional[int] = None
     session_id: Optional[int] = None
     message: str
 
