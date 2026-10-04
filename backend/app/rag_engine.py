@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import json
+from urllib.parse import urljoin
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import logging
@@ -162,11 +163,20 @@ class RAGEngine:
                 
                 # Remove excessive whitespace
                 text_content = re.sub(r'\s+', ' ', text_content)
+
+                image_url = None
+                image_tag = (
+                    soup.find('meta', property='og:image')
+                    or soup.find('meta', attrs={'name': 'twitter:image'})
+                )
+                if image_tag and image_tag.get('content'):
+                    image_url = urljoin(source['url'], image_tag['content'])
                 
                 scraped_data.append({
                     'url': source['url'],
                     'title': source['title'],
                     'content': text_content[:5000],  # Limit content size
+                    'image_url': image_url,
                     'scraped_at': datetime.utcnow().isoformat()
                 })
                 
@@ -191,7 +201,7 @@ class RAGEngine:
             'ports': self._extract_ports(combined_text),
             'os': self._extract_os(combined_text),
             'known_issues': self._extract_known_issues(combined_text),
-            'image_url': None,
+            'image_url': next((item.get('image_url') for item in scraped_data if item.get('image_url')), None),
             'source_urls': list(set([d['url'] for d in scraped_data]))
         }
         
@@ -231,6 +241,7 @@ class RAGEngine:
         """Extract RAM information"""
         patterns = [
             r'(\d+\s*GB\s+(?:DDR[45]|LPDDR[45]|DDR5)\s+RAM)',
+            r'(\d+\s*GB\s+(?:DDR[45]|LPDDR[45]))',
             r'(\d+\s*GB\s+memory)',
             r'(\d+\s*GB\s+RAM)',
         ]
@@ -244,19 +255,23 @@ class RAGEngine:
         """Extract storage information"""
         patterns = [
             r'(\d+\s*(?:GB|TB)\s+(?:SSD|NVMe|PCIe|storage))',
-            r'(\d+\s*(?:GB|TB)\s+.*?(?:SSD|NVMe|storage))',
+            r'(\d+\s*(?:GB|TB)\s+(?:solid state drive|hard drive))',
         ]
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
             if match:
-                return match.group(1)
+                value = match.group(1)
+                if 'nvme' in value.lower() and 'ssd' not in value.lower():
+                    return f'{value} SSD'
+                return value
         return None
     
     def _extract_display(self, text: str) -> Optional[str]:
         """Extract display information"""
         patterns = [
             r'(\d+\.?\d*"\s+(?:FHD|UHD|4K|HD|IPS|OLED).*?display)',
-            r'(\d+\.?\d*inch\s+.*?display)',
+            r'(\d+\.?\d*"\s+(?:FHD|UHD|4K|HD|IPS|OLED))',
+            r'(\d+\.?\d*\s*inch\s+.*?display)',
             r'(\d+\s*x\s*\d+\s+resolution)',
         ]
         for pattern in patterns:

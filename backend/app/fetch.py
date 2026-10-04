@@ -1,5 +1,7 @@
 #fetch.py
-from pydantic import BaseModel, EmailStr
+import json
+
+from pydantic import BaseModel, EmailStr, field_validator
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
@@ -67,6 +69,19 @@ class LaptopSpecsBase(BaseModel):
     known_issues: Optional[List[str]] = None
     image_url: Optional[str] = None
     source_urls: Optional[List[str]] = None
+
+    @field_validator("ports", "known_issues", "source_urls", mode="before")
+    @classmethod
+    def parse_json_lists(cls, value):
+        if value is None or isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return []
+            return parsed if isinstance(parsed, list) else []
+        return value
 
 
 class LaptopSpecsCreate(LaptopSpecsBase):
