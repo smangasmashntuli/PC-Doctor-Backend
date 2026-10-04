@@ -18,7 +18,12 @@ logger = logging.getLogger(__name__)
 class GeminiService:
     def __init__(self):
         self.api_key = os.getenv("GEMINI_FLASH_API_KEY")
-        self.image_api_key = os.getenv("GEMINI_IMAGEN_API_KEY") or os.getenv("GEMINI_IMAGE_API_KEY")
+        configured_image_key = os.getenv("GEMINI_IMAGEN_API_KEY") or os.getenv("GEMINI_IMAGE_API_KEY")
+        self.image_api_key = (
+            configured_image_key
+            if configured_image_key and not configured_image_key.startswith("your_")
+            else self.api_key
+        )
         if not self.api_key:
             raise ValueError("GEMINI_FLASH_API_KEY not found in environment variables")
         
@@ -250,7 +255,7 @@ class GeminiService:
             if image_bytes:
                 return f"data:image/png;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
 
-        return "https://example.com/laptop.png"
+        return None
     
     async def get_chat_response(
         self,
