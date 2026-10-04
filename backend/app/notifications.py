@@ -29,7 +29,7 @@ class NotificationService:
             'priority': 'low'
         },
         'os_updates': {
-            'title': '💻 Operating System Updates',
+            'title': 'Operating System Updates',
             'message': 'Check for {os} updates on your {brand} {model} to ensure security and performance.',
             'frequency_days': 14,  # Every 2 weeks
             'priority': 'high'
@@ -47,7 +47,7 @@ class NotificationService:
             'priority': 'low'
         },
         'security_scan': {
-            'title': '🔒 Security Scan',
+            'title': 'Security Scan',
             'message': 'Run a full security scan on your {brand} {model} to detect any malware or threats.',
             'frequency_days': 7,  # Weekly
             'priority': 'high'
