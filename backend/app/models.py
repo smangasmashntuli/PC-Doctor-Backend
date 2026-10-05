@@ -41,7 +41,11 @@ class LaptopSpecs(Base):
     ports = Column(Text, nullable=True)  # JSON string
     os = Column(String(100), nullable=True)
     known_issues = Column(Text, nullable=True)  # JSON string
-    image_url = Column(String(500), nullable=True)
+    # Generated images are returned as base64 data URIs, which are far larger
+    # than VARCHAR(500). Storing them in a narrow column raised
+    # "Data too long for column 'image_url'" on MySQL and the commit that
+    # persisted the image silently failed.
+    image_url = Column(Text, nullable=True)
     source_urls = Column(Text, nullable=True)  # JSON string of source citations
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

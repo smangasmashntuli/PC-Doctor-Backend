@@ -3,7 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import json
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, parse_qs
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import logging
@@ -43,6 +43,24 @@ class RAGEngine:
             
             # Step 3: Parse and structure the specs
             structured_specs = self._parse_specs(scraped_data, brand, model_name)
+
+            # Regex extraction is intentionally conservative; use Gemini to fill
+            # fields that source pages do not expose as plain text.
+            core_fields = ("cpu", "gpu", "ram", "storage", "display", "os")
+            if sum(bool(structured_specs.get(field)) for field in core_fields) < 2:
+                try:
+                    from backend.app.gemini_service import get_gemini_service
+
+                    enriched_specs = await get_gemini_service().enrich_laptop_specs(
+                        brand=brand,
+                        model_name=model_name,
+                        current_specs=structured_specs,
+                    )
+                    for field, value in enriched_specs.items():
+                        if not structured_specs.get(field):
+                            structured_specs[field] = value
+                except Exception as enrichment_error:
+                    logger.warning(f"Gemini laptop spec enrichment unavailable: {enrichment_error}")
             
             # Step 4: Store in vector database
             sources_found = self._store_in_vector_db(structured_specs, brand, model_name)
@@ -88,7 +106,13 @@ class RAGEngine:
                 specs.ports = json.dumps(structured_specs.get('ports', []))
                 specs.os = structured_specs.get('os')
                 specs.known_issues = json.dumps(structured_specs.get('known_issues', []))
-                specs.image_url = structured_specs.get('image_url')
+                # Only overwrite the stored image when scraping actually found
+                # a new one. Assigning the (usually None) scraped value here
+                # wiped a previously generated image on every re-ingest, which
+                # is why the UI stopped showing it.
+                scraped_image_url = structured_specs.get('image_url')
+                if scraped_image_url:
+                    specs.image_url = scraped_image_url
                 specs.source_urls = json.dumps(structured_specs.get('source_urls', []))
                 specs.updated_at = datetime.utcnow()
                 
@@ -120,24 +144,70 @@ class RAGEngine:
         
         results = []
         
-        # Use DuckDuckGo for web search (no API key required)
+        # DuckDuckGo is used because it needs no API key. It intermittently
+        # answers HTTP 202 (bot challenge) with an empty result set, so we try
+        # both endpoints and both the dedicated and generic anchor selectors.
+        endpoints = (
+            "https://html.duckduckgo.com/html/",
+            "https://lite.duckduckgo.com/lite/",
+        )
+
         for query in search_queries[:2]:  # Limit to 2 queries to avoid rate limits
-            try:
-                search_url = f"https://html.duckduckgo.com/html/?q={query}"
-                response = requests.get(search_url, headers=self.headers, timeout=10)
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Extract search results
-                for result in soup.find_all('a', class_='result__a', limit=5):
-                    href = result.get('href', '')
-                    if href and not href.startswith('https://duckduckgo.com'):
+            for endpoint in endpoints:
+                if len(results) >= 5:
+                    break
+                try:
+                    response = requests.get(
+                        endpoint,
+                        params={"q": query},
+                        headers=self.headers,
+                        timeout=10,
+                    )
+                    status_code = getattr(response, "status_code", None)
+                    # Only reject when we can positively identify a failure;
+                    # a non-integer value means the response is not a real
+                    # HTTP result (e.g. a test double) so we parse it anyway.
+                    if isinstance(status_code, int) and status_code != 200:
+                        logger.warning(
+                            f"Search endpoint {endpoint} returned HTTP {status_code}"
+                        )
+                        continue
+
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    anchors = soup.find_all('a', class_='result__a', limit=5) or \
+                        soup.find_all('a', class_='result-link', limit=5)
+                    if not anchors:
+                        # Generic fallback: any absolute http(s) link that is
+                        # not itself a search-engine page.
+                        anchors = [
+                            a for a in soup.find_all('a', href=True)
+                            if a['href'].startswith('http')
+                        ][:5]
+
+                    for anchor in anchors:
+                        if len(results) >= 5:
+                            break
+                        href = self._normalize_result_url(anchor.get('href', ''))
+                        title = anchor.get_text(strip=True)
+                        if not href or not title:
+                            continue
                         results.append({
                             'url': href,
-                            'title': result.get_text(strip=True),
+                            'title': title,
                             'source': 'duckduckgo'
                         })
-            except Exception as e:
-                logger.warning(f"Search failed for query '{query}': {e}")
+                except Exception as e:
+                    logger.warning(f"Search failed for query '{query}' at {endpoint}: {e}")
+
+        # De-duplicate while preserving order
+        seen = set()
+        deduped = []
+        for item in results:
+            if item['url'] in seen:
+                continue
+            seen.add(item['url'])
+            deduped.append(item)
+        results = deduped
         
         # Prioritize official sources
         official_domains = [f'{brand.lower()}.com', f'{brand.lower()}.co.uk']
@@ -148,6 +218,34 @@ class RAGEngine:
         )
         
         return prioritized_results[:5]  # Return top 5 results
+
+    @staticmethod
+    def _normalize_result_url(href: str) -> Optional[str]:
+        """Resolve a search-result href into a direct http(s) URL.
+
+        DuckDuckGo wraps outbound links in ``/l/?uddg=<encoded>`` redirects,
+        and returns protocol-relative links on the lite endpoint.
+        """
+        if not href:
+            return None
+
+        href = href.strip()
+        if href.startswith('//'):
+            href = 'https:' + href
+
+        parsed = urlparse(href)
+        if parsed.netloc.endswith('duckduckgo.com') and parsed.path.startswith('/l/'):
+            target = parse_qs(parsed.query).get('uddg', [None])[0]
+            if target:
+                href = target
+
+        if not href.startswith(('http://', 'https://')):
+            return None
+
+        host = urlparse(href).netloc.lower()
+        if 'duckduckgo.com' in host:
+            return None
+        return href
 
     async def _scrape_specs_from_sources(self, sources: List[Dict]) -> List[Dict]:
         """Scrape laptop specs from source URLs"""

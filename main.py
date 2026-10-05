@@ -25,7 +25,7 @@ from backend.app.fetch import (
 )
 from backend.app.crud import get_user_by_email, get_user_by_name, create_user
 from backend.app.auth import authenticate_user, create_access_token, get_current_user
-from backend.app.database import sync_users_table_schema
+from backend.app.database import sync_users_table_schema, sync_laptop_specs_schema
 from backend.app.setup import create_laptop_setup, get_laptop_setup_by_user_id
 from backend.app.rag_engine import get_rag_engine
 from backend.app.gemini_service import get_gemini_service
@@ -46,6 +46,7 @@ from backend.app.youtube_service import get_youtube_service
 from backend.app.notifications import get_notification_service
 
 sync_users_table_schema()
+sync_laptop_specs_schema()
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Native API", description="Authentication API", version="1.0")
@@ -236,6 +237,14 @@ async def ingest_laptop_specs(
                 brand=request.brand,
                 model_name=request.model_name,
             )
+
+            # get_current_user already ran a query on this session, so a
+            # transaction (and its REPEATABLE READ snapshot) is open from
+            # before the ingestion above committed. Querying LaptopSpecs
+            # inside that stale snapshot returned None on first ingest, so
+            # the generated image was silently never saved. End the old
+            # transaction so this read observes the freshly written row.
+            db.rollback()
 
             specs_record = db.query(LaptopSpecs).filter(
                 LaptopSpecs.laptop_setup_id == result["laptop_setup_id"]

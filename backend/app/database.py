@@ -64,6 +64,27 @@ def sync_users_table_schema():
                 connection.execute(text(f"ALTER TABLE users ADD COLUMN {column_name} {definition}"))
 
 
+def sync_laptop_specs_schema():
+    """Bring the ``laptop_specs`` table up to date with the ORM models.
+
+    ``Base.metadata.create_all`` only creates missing tables, it never alters
+    existing ones. ``image_url`` used to be ``VARCHAR(500)`` which cannot hold
+    the base64 data URIs returned by the image generator, so widen it in place.
+    """
+    inspector = inspect(engine)
+    if not inspector.has_table("laptop_specs"):
+        return
+
+    columns = {column["name"]: str(column["type"]) for column in inspector.get_columns("laptop_specs")}
+    image_url_type = columns.get("image_url")
+    if not image_url_type:
+        return
+
+    if engine.dialect.name == "mysql" and image_url_type.upper().startswith("VARCHAR"):
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE laptop_specs MODIFY image_url TEXT NULL"))
+
+
 def get_db():
     db = SessionLocal()
     try:
