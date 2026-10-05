@@ -1,5 +1,7 @@
 #gemini_service.py
 import os
+import json
+import asyncio
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 import logging
@@ -13,6 +15,15 @@ from backend.app.models import LaptopSpecs, LaptopSetup, ChatMessage, Diagnostic
 from backend.app.database import SessionLocal
 
 logger = logging.getLogger(__name__)
+
+# Ordered fallbacks used when the primary chat model is unavailable.
+# gemini-1.5-flash was retired (404), so never add it back here.
+FALLBACK_TEXT_MODELS = (
+    "gemini-flash-latest",
+    "gemini-2.5-flash",
+    "gemini-flash-lite-latest",
+    "gemini-2.5-flash-lite",
+)
 
 
 class GeminiService:
@@ -28,8 +39,22 @@ class GeminiService:
             raise ValueError("GEMINI_FLASH_API_KEY not found in environment variables")
         
         self.client = genai.Client(api_key=self.api_key)
-        self.model_name = "gemini-1.5-flash"
+        # gemini-1.5-flash was retired and now returns 404 NOT_FOUND, which
+        # silently broke laptop spec enrichment (all fields stayed None and
+        # the UI rendered "N/A"). Default to a model that is actually served.
+        self.model_name = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+        # Image-capable model used with generate_content + response_modalities.
+        self.image_model_name = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+        # Legacy Imagen model, kept only as a secondary attempt.
         self.imagen_model_name = os.getenv("GEMINI_IMAGEN_MODEL", "imagen-3.0-generate-002")
+        # Image-model calls are quota-limited to 0 requests/day on the free
+        # tier, so we degrade to a neutral laptop photo instead of leaving the
+        # card blank. Set LAPTOP_FALLBACK_IMAGE= (empty) to disable this.
+        self.fallback_image_url = os.getenv(
+            "LAPTOP_FALLBACK_IMAGE",
+            "https://images.unsplash.com/photo-1593642632823-8f785ba67e45"
+            "?auto=format&fit=crop&w=900&q=80",
+        )
         self.vector_store = get_vector_store()
     
     async def generate_troubleshooting_response(
@@ -78,8 +103,19 @@ class GeminiService:
             return "I apologize, but I'm having trouble processing your request right now. Please try again or contact support if the issue persists."
 
     async def generate_laptop_image(self, brand: str, model_name: str) -> str:
-        """Generate a representative laptop image URL using Imagen 3."""
+        """Generate a representative laptop image and return a data URI.
+
+        Primary path uses an image-capable Gemini model through
+        ``generate_content`` with ``response_modalities=["IMAGE", "TEXT"]``.
+        The legacy Imagen ``generate_images`` endpoint is attempted as a
+        fallback for accounts/plans where it is still enabled, because in
+        Gemini Developer API mode it raises
+        "This method is only supported in Gemini Enterprise Agent Platform mode".
+        """
         if not self.image_api_key:
+            if self.fallback_image_url:
+                logger.warning("No image API key configured; using fallback laptop image.")
+                return self.fallback_image_url
             raise ValueError("GEMINI_IMAGEN_API_KEY not found in environment variables")
 
         prompt = (
@@ -88,6 +124,27 @@ class GeminiService:
             "no text, no watermark, and no people."
         )
 
+        errors = []
+
+        # 1) Image-capable Gemini model via generate_content
+        try:
+            image_client = genai.Client(api_key=self.image_api_key)
+            response = image_client.models.generate_content(
+                model=self.image_model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE", "TEXT"],
+                ),
+            )
+            image_url = self._extract_image_url(response)
+            if image_url:
+                return image_url
+            errors.append(f"{self.image_model_name} returned no image data")
+        except Exception as e:
+            logger.warning(f"Gemini image generation via {self.image_model_name} failed: {e}")
+            errors.append(f"{self.image_model_name}: {e}")
+
+        # 2) Legacy Imagen endpoint
         try:
             image_client = genai.Client(api_key=self.image_api_key)
             response = image_client.models.generate_images(
@@ -95,12 +152,116 @@ class GeminiService:
                 prompt=prompt,
             )
             image_url = self._extract_image_url(response)
-            if not image_url:
-                raise ValueError("Imagen API returned no usable image URL")
-            return image_url
+            if image_url:
+                return image_url
+            errors.append(f"{self.imagen_model_name} returned no image data")
         except Exception as e:
-            logger.error(f"Error generating laptop image: {e}")
-            raise
+            logger.warning(f"Imagen image generation failed: {e}")
+            errors.append(f"{self.imagen_model_name}: {e}")
+
+        detail = " | ".join(errors)
+        if self.fallback_image_url:
+            logger.warning(
+                f"AI laptop image generation unavailable ({detail}). "
+                f"Using fallback image: {self.fallback_image_url}"
+            )
+            return self.fallback_image_url
+
+        raise ValueError("Laptop image generation failed -> " + detail)
+
+    async def enrich_laptop_specs(self, brand: str, model_name: str, current_specs: Dict[str, Any]) -> Dict[str, Any]:
+        """Fill missing specification fields for a specific laptop model.
+
+        This is the primary source of specs whenever web scraping returns
+        nothing (DuckDuckGo frequently answers HTTP 202 with no results), so
+        it retries transient errors and walks a list of known-good models
+        instead of giving up on the first failure.
+        """
+        prompt = f"""
+Return verified public specifications for the exact laptop: {brand} {model_name}.
+Use your knowledge of this exact model and only fill fields that are reasonably known.
+Return JSON only with these keys: cpu, gpu, ram, storage, display, ports, os, known_issues.
+Use strings for cpu, gpu, ram, storage, display, and os. Use arrays of strings for ports and known_issues.
+Do not include markdown or explanatory text.
+
+"""
+        models_to_try = []
+        for model in (self.model_name, *FALLBACK_TEXT_MODELS):
+            if model and model not in models_to_try:
+                models_to_try.append(model)
+
+        errors = []
+        for model in models_to_try:
+            for attempt in range(2):
+                try:
+                    response = self.client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            temperature=0.1,
+                            max_output_tokens=768,
+                            response_mime_type="application/json",
+                        ),
+                    )
+                    parsed = self._parse_json_object(response.text)
+                    if not isinstance(parsed, dict):
+                        errors.append(f"{model}: response was not a JSON object")
+                        break
+
+                    enriched = self._filter_spec_fields(parsed)
+                    if enriched:
+                        return enriched
+                    errors.append(f"{model}: no usable spec fields returned")
+                    break
+                except Exception as e:
+                    errors.append(f"{model}: {e}")
+                    logger.warning(
+                        f"Spec enrichment attempt {attempt + 1} on {model} failed: {e}"
+                    )
+                    # Retry the same model once on transient failures
+                    # (503 UNAVAILABLE / 429 RESOURCE_EXHAUSTED).
+                    if attempt == 0:
+                        await asyncio.sleep(1.5)
+
+        logger.warning("Laptop spec enrichment skipped -> " + " | ".join(errors))
+        return {}
+
+    @staticmethod
+    def _parse_json_object(raw_text: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Parse a JSON object out of a model response, tolerating fences."""
+        if not raw_text:
+            return None
+        text = raw_text.strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.startswith("json"):
+                text = text[4:]
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Last resort: pull the outermost {...} block.
+            start, end = text.find("{"), text.rfind("}")
+            if start != -1 and end > start:
+                try:
+                    return json.loads(text[start:end + 1])
+                except json.JSONDecodeError:
+                    return None
+            return None
+
+    @staticmethod
+    def _filter_spec_fields(parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep only well-typed, non-empty spec fields."""
+        enriched = {}
+        for field in ("cpu", "gpu", "ram", "storage", "display", "ports", "os", "known_issues"):
+            value = parsed.get(field)
+            if field in ("ports", "known_issues"):
+                if isinstance(value, list):
+                    cleaned = [str(item).strip() for item in value if str(item).strip()]
+                    if cleaned:
+                        enriched[field] = cleaned
+            elif isinstance(value, str) and value.strip():
+                enriched[field] = value.strip()
+        return enriched
 
     async def explain_component(
         self,
@@ -229,10 +390,39 @@ class GeminiService:
         return conversation
 
     def _extract_image_url(self, response: Any) -> Optional[str]:
-        """Best-effort extraction of a usable URL or data URL from an Imagen response."""
-        generated_images = getattr(response, "generated_images", None) or getattr(response, "images", None) or []
-        if not isinstance(generated_images, (list, tuple)):
-            return "https://example.com/laptop.png"
+        """Best-effort extraction of a usable URL or data URI.
+
+        Handles both the ``generate_content`` shape
+        (candidates -> content -> parts -> inline_data) and the legacy
+        ``generate_images`` shape (generated_images -> image -> bytes/url).
+
+        Returns ``None`` when nothing usable is found so callers can fall
+        back instead of persisting a placeholder URL that 404s in the UI.
+        """
+        # 1) generate_content shape
+        for candidate in getattr(response, "candidates", None) or []:
+            content = getattr(candidate, "content", None)
+            for part in getattr(content, "parts", None) or []:
+                inline_data = getattr(part, "inline_data", None)
+                data = getattr(inline_data, "data", None)
+                if not data:
+                    continue
+                if isinstance(data, bytes):
+                    data = base64.b64encode(data).decode("utf-8")
+                data = str(data)
+                if data.startswith("data:"):
+                    return data
+                mime_type = getattr(inline_data, "mime_type", None) or "image/png"
+                return f"data:{mime_type};base64,{data}"
+
+        # 2) Legacy generate_images shape
+        generated_images = (
+            getattr(response, "generated_images", None)
+            or getattr(response, "images", None)
+            or []
+        )
+        if not isinstance(generated_images, (list, tuple)) or not generated_images:
+            return None
 
         first_image = generated_images[0]
         for attr_name in ("url", "uri"):
@@ -253,6 +443,8 @@ class GeminiService:
                 or getattr(nested_image, "data", None)
             )
             if image_bytes:
+                if isinstance(image_bytes, str):
+                    return image_bytes
                 return f"data:image/png;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
 
         return None
