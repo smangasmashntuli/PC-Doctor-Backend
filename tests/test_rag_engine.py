@@ -72,26 +72,26 @@ class TestRAGEngine:
             mock_db = Mock()
             mock_db_class.return_value = mock_db
             
-            # Mock laptop setup (doesn't exist initially)
-            mock_laptop_setup = Mock()
-            mock_laptop_setup.id = 1
-            mock_laptop_setup.user_id = 1
-            
-            # Mock specs
-            mock_specs = Mock()
-            mock_specs.id = 1
-            mock_specs.laptop_setup_id = 1
-            
-            # Setup query chain to return None first, then return mocks
-            mock_query = Mock()
-            mock_filter = Mock()
-            mock_query.return_value = mock_filter
-            mock_filter.return_value.first.side_effect = [
+            # The code issues exactly two lookups against the session:
+            #   db.query(LaptopSetup).filter(...).first()  -> None (create)
+            #   db.query(LaptopSpecs).filter(...).first()  -> None (create)
+            # Wire the chain the way it is actually traversed:
+            # db.query(...).filter(...).first()
+            mock_db.query.return_value.filter.return_value.first.side_effect = [
                 None,  # No existing laptop setup
                 None,  # No existing specs
-                mock_specs  # Return specs after creation
             ]
-            mock_db.query.return_value = mock_query
+
+            # A real session.refresh() repopulates primary keys after commit;
+            # a bare Mock does not, so emulate it. Without this the returned
+            # laptop_setup_id stays a Mock and the assertion below fails.
+            def _fake_refresh(obj):
+                if isinstance(obj, LaptopSetup):
+                    obj.id = 1
+                elif isinstance(obj, LaptopSpecs):
+                    obj.id = 1
+
+            mock_db.refresh.side_effect = _fake_refresh
             
             # Execute ingestion
             result = await rag_engine.ingest_laptop_specs(

@@ -9,20 +9,48 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 sys.modules['chromadb'] = Mock()
 sys.modules['chromadb.config'] = Mock()
-sys.modules['google'] = Mock()
-sys.modules['google.genai'] = Mock()
 
-rag_engine_stub = types.ModuleType('backend.app.rag_engine')
-rag_engine_stub.get_rag_engine = lambda: Mock()
-sys.modules['backend.app.rag_engine'] = rag_engine_stub
+# ``main`` pulls in heavy/optional modules at import time. Stub them out, but
+# ONLY for the moment ``main`` is imported: permanently overwriting entries in
+# sys.modules leaks into every other test module collected in the same pytest
+# process. That previously made ``from backend.app.rag_engine import
+# RAGEngine`` resolve to this stub ("unknown location") and replaced the real
+# ``google`` package with a Mock, breaking unrelated test files.
+_STUBBED_MODULES = {
+    'backend.app.rag_engine': {'get_rag_engine': lambda: Mock()},
+    'backend.app.youtube_service': {'get_youtube_service': lambda: Mock()},
+    'backend.app.notifications': {'get_notification_service': lambda: Mock()},
+}
 
-youtube_service_stub = types.ModuleType('backend.app.youtube_service')
-youtube_service_stub.get_youtube_service = lambda: Mock()
-sys.modules['backend.app.youtube_service'] = youtube_service_stub
 
-notifications_stub = types.ModuleType('backend.app.notifications')
-notifications_stub.get_notification_service = lambda: Mock()
-sys.modules['backend.app.notifications'] = notifications_stub
+def _import_main():
+    """Import the FastAPI app with temporary stubs, then restore sys.modules.
+
+    ``main`` caches its imported callables in its own namespace, so it keeps
+    using the stubs afterwards even though sys.modules is restored.
+    """
+    if 'main' in sys.modules:
+        return sys.modules['main']
+
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULES}
+    saved_google = {name: sys.modules.get(name) for name in ('google', 'google.genai')}
+    try:
+        for name, attrs in _STUBBED_MODULES.items():
+            stub = types.ModuleType(name)
+            for attr_name, attr_value in attrs.items():
+                setattr(stub, attr_name, attr_value)
+            sys.modules[name] = stub
+        sys.modules['google'] = Mock()
+        sys.modules['google.genai'] = Mock()
+
+        import main  # noqa: F401
+        return sys.modules['main']
+    finally:
+        for name, previous in {**saved, **saved_google}.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
 
 from fastapi.testclient import TestClient
 
@@ -82,7 +110,7 @@ async def test_explain_component_returns_non_technical_text(mock_gemini_service)
 
 
 def test_laptop_3d_model_endpoint_returns_mapping():
-    from main import app
+    app = _import_main().app
     from backend.app.auth import get_current_user
     from backend.app.database import get_db
 
@@ -126,7 +154,7 @@ def test_laptop_3d_model_endpoint_returns_mapping():
 
 
 def test_chat_explain_component_endpoint_returns_plain_language():
-    from main import app
+    app = _import_main().app
     from backend.app.auth import get_current_user
 
     client = TestClient(app)

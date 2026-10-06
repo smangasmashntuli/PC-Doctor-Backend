@@ -332,7 +332,7 @@ class TestNotificationService:
             titles = [n['title'] for n in result]
             assert any('Clean' in title or '🧹' in title for title in titles)
             assert any('Battery' in title or '🔋' in title for title in titles)
-            assert any('OS' in title or '💻' in title for title in titles)
+            assert any('OS' in title for title in titles)
     
     def test_generate_maintenance_alerts_respects_frequency(
         self, notification_service, mock_laptop_setup, mock_laptop_specs

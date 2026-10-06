@@ -293,7 +293,7 @@ class TestChatIntegration:
             RiskLevel.HIGH,
             {
                 'is_high_risk': True,
-                'warning_title': '🚨 Battery Swelling Detected - Immediate Safety Risk',
+                'warning_title': 'Battery Swelling Detected - Immediate Safety Risk',
                 'warning_message': 'A swollen battery is dangerous.',
                 'action_recommendation': 'Visit a certified repair technician immediately.',
                 'category': 'swollen_battery'
