@@ -1,5 +1,6 @@
 #auth.py
 import os
+import logging
 from datetime import timedelta, datetime
 from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,6 +14,7 @@ from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from jose import jwt, JWTError
 from backend.app.fetch import TokenData
 
+logger = logging.getLogger(__name__)
 pass_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -21,7 +23,11 @@ ALGORITHM = "HS256"
 oath2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 def verify_password(plain_password, hashed_password):
-    return pass_context.verify(plain_password, hashed_password)
+    try:
+        return pass_context.verify(plain_password, hashed_password)
+    except (ValueError, TypeError) as error:
+        logger.warning("Password verification failed: %s", error)
+        return False
 
 def get_password_hash(password):
     return pass_context.hash(password)
